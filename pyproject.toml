@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "auroragcafs"
+version = "0.1.0"
+description = "Adapting Microsoft's Aurora AI for NOAA's UFS/GEFS-aerosol output"
+readme = "README.md"
+authors = [
+    {name = "AuroraGCAFS Team"}
+]
+license = {text = "MIT"}
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+requires-python = ">=3.8"
+dependencies = [
+    "numpy>=1.20.0",
+    "pandas>=1.3.0",
+    "xarray>=0.20.0",
+    "netCDF4>=1.5.7",
+    "matplotlib>=3.4.0",
+    "scipy>=1.7.0",
+    "scikit-learn>=1.0.0",
+    "torch>=1.10.0",
+    "cartopy>=0.20.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=6.0",
+    "black>=22.0",
+    "flake8>=4.0",
+    "mypy>=0.9",
+    "isort>=5.10.0",
+]
+
+[tool.setuptools]
+package-dir = {"" = "sorc"}
+
+[tool.black]
+line-length = 88
+target-version = ["py38"]
+
+[tool.isort]
+profile = "black"
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true

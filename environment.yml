@@ -1,0 +1,24 @@
+name: auroragcafs
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python>=3.8
+  - numpy>=1.20.0
+  - pandas>=1.3.0
+  - xarray>=0.20.0
+  - netCDF4>=1.5.7
+  - matplotlib>=3.4.0
+  - cartopy>=0.20.0
+  - scikit-learn>=1.0.0
+  - scipy>=1.7.0
+  - pytorch>=1.10.0
+  - dask>=2022.1.0
+  - s3fs>=2022.1.0
+  - zarr>=2.10.0
+  - cfgrib>=0.9.9
+  - jupyter>=1.0.0
+  - pip>=22.0
+  - pip:
+    - -r requirements.txt
+    - -e .

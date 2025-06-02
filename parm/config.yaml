@@ -1,0 +1,83 @@
+# Configuration file for AuroraGCAFS
+# This file contains default parameters for data processing and model operation
+
+# Data source settings
+data:
+  ufs_data_path: "/path/to/ufs/data"
+  gefs_data_path: "/path/to/gefs/data"
+  output_path: "./output"
+  cache_dir: "~/.auroragcafs/cache"
+
+# Model settings
+model:
+  use_gpu: true
+  batch_size: 32
+  learning_rate: 0.001
+  epochs: 100
+  architecture: "unet"
+  optimizer: "adam"
+  loss_function: "mse"
+
+# Data processing settings
+processing:
+  variable_names:
+    - dust
+    - sea_salt
+    - sulfate
+    - organic_carbon
+    - black_carbon
+  resolution: 0.25  # degrees
+  temporal_frequency: "6h"  # 6-hourly data
+  interpolation_method: "bilinear"
+
+  # Normalization settings
+  normalization:
+    method: "min_max"  # Options: min_max, z_score, log, none
+    pre_log_transform:  # Settings for log transformation before normalization
+      enabled: false  # Whether to apply log transform before normalization
+      variables:  # List of variables to apply log transform to. If empty, applies to all
+        - dust
+        - sulfate
+      base: "e"  # Options: e, 10
+      offset: 1.0  # Added before taking log to handle zeros: log(x + offset)
+    per_variable: true  # Whether to normalize each variable separately
+    scale_factors:  # Optional scaling factors per variable
+      dust: 1.0
+      sea_salt: 1.0
+      sulfate: 1.0
+      organic_carbon: 1.0
+      black_carbon: 1.0
+    bounds:  # Optional bounds for min_max normalization
+      min: 0.0
+      max: 1.0
+    epsilon: 1.0e-8  # Small constant to avoid division by zero
+
+# Visualization settings
+visualization:
+  map_projection: "PlateCarree"
+  colormap: "viridis"
+  dpi: 300
+  figure_width: 10
+  figure_height: 8
+
+# Logging configuration
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file: "logs/auroragcafs.log"
+
+# System settings
+system:
+  compute:
+    n_workers: 4  # Number of parallel workers/processes
+    worker_memory: "8GB"  # Memory limit per worker
+    total_memory: "32GB"  # Total memory limit for all workers
+    gpu_memory: "16GB"  # GPU memory limit per device if using GPUs
+  distributed:
+    enable_dask: true
+    scheduler: "slurm"  # Options: slurm, pbs, none
+    partition: "compute"  # HPC partition/queue name
+    time_limit: "24:00:00"  # Maximum job runtime
+    nodes: 1  # Number of nodes to request
+    cores_per_node: 36  # Number of CPU cores per node
+    gpus_per_node: 4  # Number of GPUs per node (if using GPUs)

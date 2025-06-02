@@ -1,0 +1,18 @@
+# Core dependencies for AuroraGCAFS
+numpy>=1.20.0
+pandas>=1.3.0
+xarray>=0.20.0
+netCDF4>=1.5.7
+matplotlib>=3.4.0
+scipy>=1.7.0
+scikit-learn>=1.0.0
+torch>=1.10.0
+cartopy>=0.20.0
+
+# For NOAA UFS/GEFS-aerosol data access
+s3fs>=2022.1.0
+zarr>=2.10.0
+dask>=2022.1.0
+cfgrib>=0.9.9
+grib2io>=3.0.0  # For efficient GRIB2 file reading
+eccodes>=1.5.0  # Required by grib2io

@@ -1,0 +1,340 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE workflow [
+  <!ENTITY ACCOUNT    "rda-arl-gpu">
+  <!ENTITY WALLTIME   "8:00:00">
+  <!ENTITY MEMORY     "256">
+  <!ENTITY PARTITION  "u1-h100">
+  <!ENTITY QOS        "gpu">
+  <!ENTITY RUNDIR     "/scratch/users/@USER@/auroragcafs">
+  <!ENTITY LOG_DIR    "&RUNDIR;/logs">
+  <!ENTITY SCRIPTS    "/users/@USER@/AuroraGCAFS/scripts">
+  <!ENTITY EVAL_WALLTIME  "04:00:00">
+  <!ENTITY METRICS_WALLTIME "02:00:00">
+]>
+<workflow realtime="false" scheduler="slurm" cyclethrottle="1">
+
+  <log><cyclestr>&LOG_DIR;/rocoto_@Y@m@d@H.log</cyclestr></log>
+
+  <!-- Define cycle definitions for different tasks -->
+  <cycledef group="training">202501010000 202512310000 00:00:30:00:00:00</cycledef>
+  <cycledef group="evaluation">202501010000 202512310000 00:00:30:00:00:00</cycledef>
+  <cycledef group="metrics">202501010000 202512310000 00:01:00:00:00:00</cycledef>
+
+  <!-- Task for initial model training -->
+  <task name="initial_training" cycledefs="initial" maxtries="3">
+    <jobname><cyclestr>aurora_train_@Y@m@d</cyclestr></jobname>
+    <account>&ACCOUNT;</account>
+    <queue>&PARTITION;</queue>
+    <partition>&PARTITION;</partition>
+    <walltime>&WALLTIME;</walltime>
+    <nodes>1:ppn=32</nodes>
+    <memory>&MEMORY;G</memory>
+    <native>--qos=&QOS; --gres=gpu:h100:1</native>
+
+    <command><cyclestr>
+#!/bin/bash
+module purge
+module use /apps/modules
+module load conda cuda cudnn
+
+# Activate conda environment
+source /usr/local/other/miniconda3/etc/profile.d/conda.sh
+conda activate auroragcafs
+
+# Set directory paths
+WORKDIR="${PWD}"
+OUTPUT_DIR="&RUNDIR;/training/@Y@m@d"
+mkdir -p ${OUTPUT_DIR}/logs
+mkdir -p ${OUTPUT_DIR}/checkpoints
+
+# Set environment variables
+export SLURM_EXPORT_ENV=ALL
+export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
+export OMP_PLACES=cores
+export OMP_PROC_BIND=close
+export PYTHONPATH=${WORKDIR}:$PYTHONPATH
+
+# Run the training script
+srun python ${WORKDIR}/scripts/train_model.py \
+  --start-date @Y@@m@@d@ \
+  --end-date @Y@@m@`expr @d@ + 29` \
+  --output-dir ${OUTPUT_DIR} \
+  --batch-size 64 \
+  --epochs 30 \
+  --learning-rate 0.001 \
+  --ewc-lambda 0.0
+
+# Create a symlink to latest model
+if [ -f "${OUTPUT_DIR}/checkpoints/model_@Y@@m@@d@_@Y@@m@`expr @d@ + 29`_best.pt" ]; then
+  ln -sf ${OUTPUT_DIR}/checkpoints/model_@Y@@m@@d@_@Y@@m@`expr @d@ + 29`_best.pt &RUNDIR;/models/initial_model.pt
+  echo "Latest model linked at: &RUNDIR;/models/initial_model.pt"
+fi
+    </cyclestr></command>
+
+    <jobout><cyclestr>&LOG_DIR;/initial_training_@Y@m@d.out</cyclestr></jobout>
+    <joberr><cyclestr>&LOG_DIR;/initial_training_@Y@m@d.err</cyclestr></joberr>
+  </task>
+
+  <!-- Task for model evaluation -->
+  <task name="model_evaluation" cycledefs="evaluation" maxtries="3">
+    <jobname><cyclestr>aurora_eval_@Y@m@d</cyclestr></jobname>
+    <account>&ACCOUNT;</account>
+    <queue>&PARTITION;</queue>
+    <partition>&PARTITION;</partition>
+    <walltime>&EVAL_WALLTIME;</walltime>
+    <nodes>1:ppn=16</nodes>
+    <memory>128G</memory>
+    <native>--qos=&QOS; --gres=gpu:h100:1</native>
+
+    <!-- Dependency on initial training or continual learning -->
+    <dependency>
+      <or>
+        <and>
+          <taskdep task="initial_training"/>
+          <datadep><cyclestr>&RUNDIR;/models/initial_model.pt</cyclestr></datadep>
+        </and>
+        <and>
+          <taskdep task="continual_learning"/>
+          <datadep><cyclestr>&RUNDIR;/models/model_@Y@@m@@d@.pt</cyclestr></datadep>
+        </and>
+      </or>
+    </dependency>
+
+    <command><cyclestr>
+#!/bin/bash
+module purge
+module use /apps/modules
+module load conda cuda cudnn
+
+# Activate conda environment
+source /usr/local/other/miniconda3/etc/profile.d/conda.sh
+conda activate auroragcafs
+
+# Set directory paths
+WORKDIR="${PWD}"
+MODEL_NAME="model_@Y@@m@@d@.pt"
+MODEL_PATH="&RUNDIR;/models/${MODEL_NAME}"
+OUTPUT_DIR="&RUNDIR;/evaluation/@Y@@m@@d@_@Y@@m@`expr @d@ + 29`"
+
+# If the model doesn't exist but initial_model does, use that
+if [ ! -f "${MODEL_PATH}" ]; then
+  if [ -f "&RUNDIR;/models/initial_model.pt" ]; then
+    MODEL_PATH="&RUNDIR;/models/initial_model.pt"
+    echo "Using initial model: ${MODEL_PATH}"
+  else
+    echo "Error: No model found at ${MODEL_PATH} or initial_model.pt"
+    exit 1
+  fi
+fi
+
+mkdir -p ${OUTPUT_DIR}
+
+# Set environment variables
+export SLURM_EXPORT_ENV=ALL
+export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
+export OMP_PLACES=cores
+export OMP_PROC_BIND=close
+export PYTHONPATH=${WORKDIR}:$PYTHONPATH
+
+# Run the evaluation script
+echo "Evaluating model: ${MODEL_PATH}"
+srun python &SCRIPTS;/evaluate_model.py \
+  --model-path ${MODEL_PATH} \
+  --data-start @Y@@m@@d@ \
+  --data-end @Y@@m@`expr @d@ + 29` \
+  --output-dir ${OUTPUT_DIR} \
+  --batch-size 64
+
+echo "Evaluation completed. Results saved to: ${OUTPUT_DIR}"
+    </cyclestr></command>
+
+    <jobout><cyclestr>&LOG_DIR;/evaluation_@Y@m@d.out</cyclestr></jobout>
+    <joberr><cyclestr>&LOG_DIR;/evaluation_@Y@m@d.err</cyclestr></joberr>
+  </task>
+
+  <!-- Task for metrics updates -->
+  <task name="metrics_update" cycledefs="metrics" maxtries="3">
+    <jobname><cyclestr>aurora_metrics_@Y@m@d</cyclestr></jobname>
+    <account>&ACCOUNT;</account>
+    <queue>&PARTITION;</queue>
+    <partition>&PARTITION;</partition>
+    <walltime>&METRICS_WALLTIME;</walltime>
+    <nodes>1:ppn=8</nodes>
+    <memory>64G</memory>
+    <native>--qos=&QOS;</native>
+
+    <!-- Dependency on at least one evaluation task -->
+    <dependency>
+      <taskdep task="model_evaluation"/>
+    </dependency>
+
+    <command><cyclestr>
+#!/bin/bash
+module purge
+module use /apps/modules
+module load conda
+
+# Activate conda environment
+source /usr/local/other/miniconda3/etc/profile.d/conda.sh
+conda activate auroragcafs
+
+# Set directory paths
+WORKDIR="${PWD}"
+METRICS_DIR="&RUNDIR;/evaluation"
+OUTPUT_DIR="&RUNDIR;/metrics/@Y@@m@@d@"
+
+mkdir -p ${OUTPUT_DIR}
+
+# Set environment variables
+export PYTHONPATH=${WORKDIR}:$PYTHONPATH
+
+# Run the metrics update script
+echo "Running metrics update"
+python &SCRIPTS;/update_metrics.py \
+  --metrics-dir ${METRICS_DIR} \
+  --output-dir ${OUTPUT_DIR}
+
+echo "Metrics update completed. Results saved to: ${OUTPUT_DIR}"
+
+# Create a symlink to the latest metrics
+ln -sf ${OUTPUT_DIR}/summary_report.json &RUNDIR;/latest_metrics.json
+ln -sf ${OUTPUT_DIR}/plots/combined_metrics.png &RUNDIR;/latest_metrics.png
+    </cyclestr></command>
+
+    <jobout><cyclestr>&LOG_DIR;/metrics_@Y@m@d.out</cyclestr></jobout>
+    <joberr><cyclestr>&LOG_DIR;/metrics_@Y@m@d.err</cyclestr></joberr>
+  </task>
+
+  <!-- Task for continual learning -->
+  <task name="continual_learning" cycledefs="training" maxtries="3">
+    <jobname><cyclestr>aurora_cl_@Y@m@d</cyclestr></jobname>
+    <account>&ACCOUNT;</account>
+    <queue>&PARTITION;</queue>
+    <partition>&PARTITION;</partition>
+    <walltime>&WALLTIME;</walltime>
+    <nodes>1:ppn=32</nodes>
+    <memory>&MEMORY;G</memory>
+    <native>--qos=&QOS; --gres=gpu:h100:1</native>
+
+    <!-- Dependency on initial training or previous continual learning task -->
+    <dependency>
+      <or>
+        <and>
+          <taskdep task="initial_training" cycle_offset="-00:00:30:00:00"/>
+          <datadep><cyclestr>&RUNDIR;/models/initial_model.pt</cyclestr></datadep>
+        </and>
+        <and>
+          <taskdep task="continual_learning" cycle_offset="-00:00:30:00:00"/>
+          <datadep><cyclestr>&RUNDIR;/models/model_@Ym1@@m@@d@.pt</cyclestr></datadep>
+        </and>
+      </or>
+    </dependency>
+
+    <command><cyclestr>
+#!/bin/bash
+module purge
+module use /apps/modules
+module load conda cuda cudnn
+
+# Activate conda environment
+source /usr/local/other/miniconda3/etc/profile.d/conda.sh
+conda activate auroragcafs
+
+# Set directory paths
+WORKDIR="${PWD}"
+OUTPUT_DIR="&RUNDIR;/training/@Y@m@d"
+mkdir -p ${OUTPUT_DIR}/logs
+mkdir -p ${OUTPUT_DIR}/checkpoints
+
+# Set environment variables
+export SLURM_EXPORT_ENV=ALL
+export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
+export OMP_PLACES=cores
+export OMP_PROC_BIND=close
+export PYTHONPATH=${WORKDIR}:$PYTHONPATH
+
+# Get the previous model path
+PREV_MODEL="&RUNDIR;/models/model_@Ym1@@m@@d@.pt"
+
+# Run the training script
+srun python ${WORKDIR}/scripts/train_model.py \
+  --start-date @Y@@m@@d@ \
+  --end-date @Y@@m@`expr @d@ + 29` \
+  --model-path ${PREV_MODEL} \
+  --output-dir ${OUTPUT_DIR} \
+  --batch-size 64 \
+  --epochs 10 \
+  --learning-rate 0.0005 \
+  --ewc-lambda 100.0
+
+# Save and link the new model
+if [ -f "${OUTPUT_DIR}/checkpoints/model_@Y@@m@@d@_@Y@@m@`expr @d@ + 29`_best.pt" ]; then
+  cp ${OUTPUT_DIR}/checkpoints/model_@Y@@m@@d@_@Y@@m@`expr @d@ + 29`_best.pt &RUNDIR;/models/model_@Y@@m@@d@.pt
+  ln -sf &RUNDIR;/models/model_@Y@@m@@d@.pt &RUNDIR;/models/latest_model.pt
+  echo "Latest model saved and linked at: &RUNDIR;/models/latest_model.pt"
+fi
+    </cyclestr></command>
+
+    <jobout><cyclestr>&LOG_DIR;/continual_learning_@Y@m@d.out</cyclestr></jobout>
+    <joberr><cyclestr>&LOG_DIR;/continual_learning_@Y@m@d.err</cyclestr></joberr>
+  </task>
+
+  <!-- Task for model evaluation -->
+  <task name="model_evaluation" cycledefs="continual" maxtries="3">
+    <jobname><cyclestr>aurora_eval_@Y@m@d</cyclestr></jobname>
+    <account>&ACCOUNT;</account>
+    <queue>&PARTITION;</queue>
+    <partition>&PARTITION;</partition>
+    <walltime>03:00:00</walltime>
+    <nodes>1:ppn=16</nodes>
+    <memory>128G</memory>
+    <native>--qos=&QOS; --gres=gpu:h100:1</native>
+
+    <!-- Dependency on continual learning task -->
+    <dependency>
+      <taskdep task="continual_learning"/>
+    </dependency>
+
+    <command><cyclestr>
+#!/bin/bash
+module purge
+module use /apps/modules
+module load conda cuda cudnn
+
+# Activate conda environment
+source /usr/local/other/miniconda3/etc/profile.d/conda.sh
+conda activate auroragcafs
+
+# Set directory paths
+WORKDIR="${PWD}"
+OUTPUT_DIR="&RUNDIR;/evaluation/@Y@m@d"
+mkdir -p ${OUTPUT_DIR}/logs
+mkdir -p ${OUTPUT_DIR}/figures
+
+# Set environment variables
+export SLURM_EXPORT_ENV=ALL
+export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
+export OMP_PLACES=cores
+export OMP_PROC_BIND=close
+export PYTHONPATH=${WORKDIR}:$PYTHONPATH
+
+# Get the latest model path
+MODEL_PATH="&RUNDIR;/models/model_@Y@@m@@d@.pt"
+
+# Run evaluation script (you'll need to create this)
+srun python ${WORKDIR}/scripts/evaluate_model.py \
+  --model-path ${MODEL_PATH} \
+  --output-dir ${OUTPUT_DIR} \
+  --date @Y@@m@@d@
+
+# Archive metrics for tracking
+python ${WORKDIR}/scripts/update_metrics.py \
+  --metrics-file ${OUTPUT_DIR}/metrics.json \
+  --history-file &RUNDIR;/evaluation/training_history.csv
+    </cyclestr></command>
+
+    <jobout><cyclestr>&LOG_DIR;/evaluation_@Y@m@d.out</cyclestr></jobout>
+    <joberr><cyclestr>&LOG_DIR;/evaluation_@Y@m@d.err</cyclestr></joberr>
+  </task>
+
+</workflow>
