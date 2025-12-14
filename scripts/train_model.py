@@ -29,7 +29,7 @@ import pandas as pd
 from datetime import datetime
 from pathlib import Path
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import multiprocessing as mp
 from typing import Optional
 
 import torch
@@ -93,6 +93,82 @@ def _load_and_process_day(date: pd.Timestamp) -> Optional[xr.Dataset]:
         logger.warning(f"Failed to load UFS data for {date_str}: {e}")
         return None
 
+def _get_data_catalog(start_date: str, end_date: str) -> pd.Series:
+    """
+    Get a catalog of data files to be loaded.
+
+    Parameters
+    ----------
+    start_date : str
+        Start date in YYYYMMDD format.
+    end_date : str
+        End date in YYYYMMDD format.
+
+    Returns
+    -------
+    pd.Series
+        A series of dates to be loaded.
+    """
+    return pd.date_range(start_date, end_date, freq='D')
+
+def _load_data_parallel(dates: pd.Series) -> list:
+    """
+    Load data in parallel using multiprocessing.
+
+    Parameters
+    ----------
+    dates : pd.Series
+        A series of dates to be loaded.
+
+    Returns
+    -------
+    list
+        A list of loaded xarray Datasets.
+    """
+    ufs_data = []
+    with mp.Pool(mp.cpu_count()) as pool:
+        with tqdm(total=len(dates), desc="Loading UFS Data") as pbar:
+            for result in pool.imap_unordered(_load_and_process_day, dates):
+                if result is not None:
+                    ufs_data.append(result)
+                pbar.update()
+    return ufs_data
+
+def _create_datasets(ufs_data: list) -> tuple:
+    """
+    Create training and validation datasets from a list of xarray Datasets.
+
+    Parameters
+    ----------
+    ufs_data : list
+        A list of loaded xarray Datasets.
+
+    Returns
+    -------
+    tuple
+        A tuple containing (train_dataset, val_dataset) for model training.
+    """
+    if not ufs_data:
+        raise ValueError("No valid training data found")
+
+    # Sort data by time to ensure correct chronological order before concatenation
+    ufs_data.sort(key=lambda ds: ds.time.values[0])
+
+    # Combine all data
+    combined_data = xr.concat(ufs_data, dim='time')
+
+    # Split into train/val
+    n_samples = len(combined_data.time)
+    train_size = int(0.8 * n_samples)
+
+    train_data = combined_data.isel(time=slice(0, train_size))
+    val_data = combined_data.isel(time=slice(train_size, None))
+
+    # Create datasets
+    train_dataset = AerosolDataset(train_data)
+    val_dataset = AerosolDataset(val_data)
+
+    return train_dataset, val_dataset
 
 def prepare_data(start_date: str, end_date: str, config) -> tuple:
     """
@@ -124,41 +200,12 @@ def prepare_data(start_date: str, end_date: str, config) -> tuple:
     logger.info("Starting parallel data preparation...")
     start_time = time.perf_counter()
 
-    dates = pd.date_range(start_date, end_date, freq='D')
-    ufs_data = []
-
-    with ThreadPoolExecutor() as executor:
-        # Create a future for each day's data loading
-        future_to_date = {executor.submit(_load_and_process_day, date): date for date in dates}
-
-        # Process futures as they complete with a progress bar
-        for future in tqdm(as_completed(future_to_date), total=len(dates), desc="Loading UFS Data"):
-            result = future.result()
-            if result is not None:
-                ufs_data.append(result)
+    dates = _get_data_catalog(start_date, end_date)
+    ufs_data = _load_data_parallel(dates)
+    train_dataset, val_dataset = _create_datasets(ufs_data)
 
     end_time = time.perf_counter()
     logger.info(f"Data preparation finished in {end_time - start_time:.2f} seconds.")
-
-    if not ufs_data:
-        raise ValueError("No valid training data found")
-
-    # Sort data by time to ensure correct chronological order before concatenation
-    ufs_data.sort(key=lambda ds: ds.time.values[0])
-
-    # Combine all data
-    combined_data = xr.concat(ufs_data, dim='time')
-
-    # Split into train/val
-    n_samples = len(combined_data.time)
-    train_size = int(0.8 * n_samples)
-
-    train_data = combined_data.isel(time=slice(0, train_size))
-    val_data = combined_data.isel(time=slice(train_size, None))
-
-    # Create datasets
-    train_dataset = AerosolDataset(train_data)
-    val_dataset = AerosolDataset(val_data)
 
     return train_dataset, val_dataset
 
