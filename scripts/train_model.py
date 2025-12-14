@@ -28,10 +28,14 @@ import logging
 import pandas as pd
 from datetime import datetime
 from pathlib import Path
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Optional
 
 import torch
 import xarray as xr
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from auroragcafs import config_manager, ufs_loader, gefs_loader, processor
 from auroragcafs.model import AerosolModel, AerosolDataset
@@ -66,11 +70,35 @@ def setup_argparse():
                        help='EWC regularization strength for preventing catastrophic forgetting')
     return parser
 
+def _load_and_process_day(date: pd.Timestamp) -> Optional[xr.Dataset]:
+    """
+    Loads and processes UFS forecast data for a single day.
+
+    Parameters
+    ----------
+    date : pd.Timestamp
+        The date for which to load data.
+
+    Returns
+    -------
+    Optional[xr.Dataset]
+        The processed xarray Dataset, or None if loading fails.
+    """
+    date_str = date.strftime('%Y%m%d')
+    try:
+        ds = ufs_loader.load_forecast(date_str, 0)
+        ds = processor.normalize(ds)
+        return ds
+    except Exception as e:
+        logger.warning(f"Failed to load UFS data for {date_str}: {e}")
+        return None
+
+
 def prepare_data(start_date: str, end_date: str, config) -> tuple:
     """
     Prepare training and validation datasets from UFS data.
 
-    This function loads UFS aerosol data for the specified date range,
+    This function loads UFS aerosol data for the specified date range in parallel,
     normalizes it using the configured normalization method, and splits it
     into training and validation datasets.
 
@@ -93,20 +121,30 @@ def prepare_data(start_date: str, end_date: str, config) -> tuple:
     ValueError
         If no valid training data is found in the date range
     """
-    # Load and process UFS data
-    ufs_data = []
+    logger.info("Starting parallel data preparation...")
+    start_time = time.perf_counter()
+
     dates = pd.date_range(start_date, end_date, freq='D')
-    for date in dates:
-        date_str = date.strftime('%Y%m%d')
-        try:
-            ds = ufs_loader.load_forecast(date_str, 0)
-            ds = processor.normalize(ds)
-            ufs_data.append(ds)
-        except Exception as e:
-            logger.warning(f"Failed to load UFS data for {date_str}: {e}")
+    ufs_data = []
+
+    with ThreadPoolExecutor() as executor:
+        # Create a future for each day's data loading
+        future_to_date = {executor.submit(_load_and_process_day, date): date for date in dates}
+
+        # Process futures as they complete with a progress bar
+        for future in tqdm(as_completed(future_to_date), total=len(dates), desc="Loading UFS Data"):
+            result = future.result()
+            if result is not None:
+                ufs_data.append(result)
+
+    end_time = time.perf_counter()
+    logger.info(f"Data preparation finished in {end_time - start_time:.2f} seconds.")
 
     if not ufs_data:
         raise ValueError("No valid training data found")
+
+    # Sort data by time to ensure correct chronological order before concatenation
+    ufs_data.sort(key=lambda ds: ds.time.values[0])
 
     # Combine all data
     combined_data = xr.concat(ufs_data, dim='time')
