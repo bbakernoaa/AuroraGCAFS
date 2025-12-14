@@ -12,3 +12,6 @@ notebook>=6.4.0
 pre-commit>=2.17.0
 sphinx>=4.4.0
 sphinx-rtd-theme>=1.0.0
+
+pytest
+pytest-mock
