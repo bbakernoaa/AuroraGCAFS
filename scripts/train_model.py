@@ -70,9 +70,9 @@ def setup_argparse():
                        help='EWC regularization strength for preventing catastrophic forgetting')
     return parser
 
-def _load_and_process_day(date: pd.Timestamp) -> Optional[xr.Dataset]:
+def _get_or_cache_day(date: pd.Timestamp) -> Optional[Path]:
     """
-    Loads and processes UFS forecast data for a single day.
+    Ensures UFS forecast data for a single day is cached and returns its path.
 
     Parameters
     ----------
@@ -81,26 +81,36 @@ def _load_and_process_day(date: pd.Timestamp) -> Optional[xr.Dataset]:
 
     Returns
     -------
-    Optional[xr.Dataset]
-        The processed xarray Dataset, or None if loading fails.
+    Optional[Path]
+        The path to the cached dataset file, or None if loading fails.
     """
     date_str = date.strftime('%Y%m%d')
+    forecast_hour = 0
+    cache_id = f"ufs_aerosol_{date_str}_f{forecast_hour:03d}"
+    cache_path = ufs_loader.get_cache_path(cache_id)
+
+    if cache_path.exists():
+        logger.debug(f"Data for {date_str} already cached at {cache_path}")
+        return cache_path
+
     try:
-        ds = ufs_loader.load_forecast(date_str, 0)
-        ds = processor.normalize(ds)
-        return ds
+        logger.info(f"Caching data for {date_str}...")
+        # This will load and then cache the data. The returned dataset is not used here.
+        ufs_loader.load_forecast(date_str, forecast_hour)
+        return cache_path
     except Exception as e:
-        logger.warning(f"Failed to load UFS data for {date_str}: {e}")
+        logger.warning(f"Failed to load or cache UFS data for {date_str}: {e}")
         return None
 
 
-def prepare_data(start_date: str, end_date: str, config) -> tuple:
+def prepare_data(start_date: str, end_date: str) -> tuple:
     """
-    Prepare training and validation datasets from UFS data.
+    Prepare training and validation datasets from UFS data memory-efficiently.
 
-    This function loads UFS aerosol data for the specified date range in parallel,
-    normalizes it using the configured normalization method, and splits it
-    into training and validation datasets.
+    This function uses xarray's open_mfdataset to lazily load UFS aerosol data
+    for the specified date range, normalizes it, and splits it into training
+    and validation datasets. This approach avoids loading the entire dataset
+    into memory at once.
 
     Parameters
     ----------
@@ -108,8 +118,6 @@ def prepare_data(start_date: str, end_date: str, config) -> tuple:
         Start date in YYYYMMDD format
     end_date : str
         End date in YYYYMMDD format
-    config : Config
-        Configuration manager instance
 
     Returns
     -------
@@ -121,33 +129,46 @@ def prepare_data(start_date: str, end_date: str, config) -> tuple:
     ValueError
         If no valid training data is found in the date range
     """
-    logger.info("Starting parallel data preparation...")
+    logger.info("Starting memory-efficient data preparation...")
     start_time = time.perf_counter()
 
     dates = pd.date_range(start_date, end_date, freq='D')
-    ufs_data = []
+    cached_files = []
 
     with ThreadPoolExecutor() as executor:
-        # Create a future for each day's data loading
-        future_to_date = {executor.submit(_load_and_process_day, date): date for date in dates}
+        # Create a future for each day's data caching
+        future_to_date = {executor.submit(_get_or_cache_day, date): date for date in dates}
 
         # Process futures as they complete with a progress bar
-        for future in tqdm(as_completed(future_to_date), total=len(dates), desc="Loading UFS Data"):
+        for future in tqdm(as_completed(future_to_date), total=len(dates), desc="Checking cache"):
             result = future.result()
             if result is not None:
-                ufs_data.append(result)
+                cached_files.append(result)
+
+    if not cached_files:
+        raise ValueError("No valid training data found")
+
+    # Sort files chronologically. Important for time series data.
+    cached_files.sort()
+
+    logger.info(f"Found {len(cached_files)} daily files. Combining with open_mfdataset.")
+
+    # Combine all data using lazy loading.
+    # Parallelism is disabled here due to a suspected concurrency issue in the
+    # underlying libraries (xarray/dask/netcdf4) that causes a segmentation fault.
+    combined_data = xr.open_mfdataset(
+        cached_files,
+        combine='nested',
+        concat_dim='time',
+        parallel=False
+    )
+
+    # Normalize the entire dataset at once for consistent scaling
+    logger.info("Normalizing combined dataset...")
+    combined_data = processor.normalize(combined_data)
 
     end_time = time.perf_counter()
     logger.info(f"Data preparation finished in {end_time - start_time:.2f} seconds.")
-
-    if not ufs_data:
-        raise ValueError("No valid training data found")
-
-    # Sort data by time to ensure correct chronological order before concatenation
-    ufs_data.sort(key=lambda ds: ds.time.values[0])
-
-    # Combine all data
-    combined_data = xr.concat(ufs_data, dim='time')
 
     # Split into train/val
     n_samples = len(combined_data.time)

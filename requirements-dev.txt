@@ -3,6 +3,8 @@
 
 # Development tools
 pytest>=6.0
+pytest-benchmark
+memory-profiler
 black>=22.0
 flake8>=4.0
 mypy>=0.9
