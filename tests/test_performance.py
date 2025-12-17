@@ -86,7 +86,10 @@ def test_prepare_data_performance(benchmark, synthetic_data_factory, monkeypatch
     num_days = 10
     cache_dir = synthetic_data_factory(num_days=num_days)
 
-    mock_ufs_loader.get_cache_path.side_effect = lambda cache_id: Path(cache_dir) / f"{cache_id}.nc"
+    def mock_get_cache_path(cache_id):
+        return Path(cache_dir) / f"{cache_id}.nc"
+
+    mock_ufs_loader.get_cache_path.side_effect = mock_get_cache_path
     mock_ufs_loader.load_forecast.return_value = None  # This is only called for caching
     mock_processor.normalize = lambda x: x  # Return data as is
 
@@ -98,6 +101,7 @@ def test_prepare_data_performance(benchmark, synthetic_data_factory, monkeypatch
         train_model.prepare_data(
             start_date='20250101',
             end_date=f'202501{num_days}',
+                ufs_loader=mock_ufs_loader
         )
 
     # 5. Run the benchmarks
