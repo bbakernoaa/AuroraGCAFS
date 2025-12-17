@@ -32,6 +32,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
+import dask
 import torch
 import xarray as xr
 from torch.utils.data import DataLoader
@@ -70,7 +71,7 @@ def setup_argparse():
                        help='EWC regularization strength for preventing catastrophic forgetting')
     return parser
 
-def _get_or_cache_day(date: pd.Timestamp) -> Optional[Path]:
+def _get_or_cache_day(date: pd.Timestamp, ufs_loader) -> Optional[Path]:
     """
     Ensures UFS forecast data for a single day is cached and returns its path.
 
@@ -103,7 +104,7 @@ def _get_or_cache_day(date: pd.Timestamp) -> Optional[Path]:
         return None
 
 
-def prepare_data(start_date: str, end_date: str) -> tuple:
+def prepare_data(start_date: str, end_date: str, ufs_loader) -> tuple:
     """
     Prepare training and validation datasets from UFS data memory-efficiently.
 
@@ -137,7 +138,10 @@ def prepare_data(start_date: str, end_date: str) -> tuple:
 
     with ThreadPoolExecutor() as executor:
         # Create a future for each day's data caching
-        future_to_date = {executor.submit(_get_or_cache_day, date): date for date in dates}
+        future_to_date = {
+            executor.submit(_get_or_cache_day, date, ufs_loader): date
+            for date in dates
+        }
 
         # Process futures as they complete with a progress bar
         for future in tqdm(as_completed(future_to_date), total=len(dates), desc="Checking cache"):
@@ -154,14 +158,15 @@ def prepare_data(start_date: str, end_date: str) -> tuple:
     logger.info(f"Found {len(cached_files)} daily files. Combining with open_mfdataset.")
 
     # Combine all data using lazy loading.
-    # Parallelism is disabled here due to a suspected concurrency issue in the
-    # underlying libraries (xarray/dask/netcdf4) that causes a segmentation fault.
-    combined_data = xr.open_mfdataset(
-        cached_files,
-        combine='nested',
-        concat_dim='time',
-        parallel=False
-    )
+    # Parallelism is enabled using Dask's multi-processing scheduler to avoid
+    # race conditions in the underlying C libraries.
+    with dask.config.set(scheduler='processes'):
+        combined_data = xr.open_mfdataset(
+            cached_files,
+            combine='nested',
+            concat_dim='time',
+            parallel=True
+        )
 
     # Normalize the entire dataset at once for consistent scaling
     logger.info("Normalizing combined dataset...")
@@ -255,7 +260,7 @@ def main():
     )
 
     # Prepare data
-    train_dataset, val_dataset = prepare_data(args.start_date, args.end_date, config_manager)
+    train_dataset, val_dataset = prepare_data(args.start_date, args.end_date, ufs_loader)
 
     # Create data loaders
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
